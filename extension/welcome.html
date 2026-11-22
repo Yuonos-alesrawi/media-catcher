@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<title>Media Catcher - Get started</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; --bg: #f5f6f8; --card: #fff; --text: #1f2937; --muted: #6b7280; --line: #e5e7eb; --blue: #2563eb; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111827; --card: #1f2937; --text: #f3f4f6; --muted: #9ca3af; --line: #374151; } }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, "Segoe UI", sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 32px 16px 48px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .step { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; margin-bottom: 12px; display: flex; gap: 14px; }
+  .num { flex: none; width: 32px; height: 32px; border-radius: 50%; background: var(--blue); color: #fff; display: grid; place-items: center; font-weight: 700; }
+  .step h2 { font-size: 17px; margin: 0 0 4px; }
+  .step p { margin: 4px 0; color: var(--muted); font-size: 14px; }
+  button.big { margin-top: 8px; border: 0; border-radius: 10px; background: var(--blue); color: #fff; font-size: 16px; padding: 10px 22px; cursor: pointer; }
+  button.big:disabled { background: #9ca3af; cursor: default; }
+  .live { border-radius: 14px; padding: 14px 18px; margin-top: 18px; font-weight: 600; border: 1px solid var(--line); }
+  .live.wait { background: var(--card); color: var(--muted); }
+  .live.ok { background: #dcfce7; color: #166534; border-color: #86efac; }
+  .live.old { background: #fef3c7; color: #92400e; border-color: #fcd34d; }
+  .note { border-radius: 10px; padding: 8px 12px; font-size: 14px; margin: 8px 0; }
+  .note.warn { background: #fef3c7; color: #92400e; }
+  .note.bad { background: #fee2e2; color: #991b1b; }
+  .foot { color: var(--muted); font-size: 13px; margin-top: 24px; }
+  code { background: var(--line); border-radius: 4px; padding: 0 5px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Welcome to Media Catcher</h1>
+  <p class="sub">The extension needs a small helper app on your computer to do the downloading. You install it once.</p>
+
+  <div id="nonwin" class="note bad" hidden>The helper app only supports Windows for now.</div>
+  <div id="devwarn" class="note warn" hidden>The download link is not set yet. Edit <code>installerUrl</code> in <code>config.js</code>.</div>
+
+  <section class="step">
+    <div class="num">1</div>
+    <div>
+      <h2>Download the helper app</h2>
+      <p>If your browser warns that the file is &ldquo;not commonly downloaded&rdquo;, choose <b>Keep</b>.</p>
+      <button id="download" class="big">Download for Windows</button>
+      <p id="dlnote" hidden>The download has started. You will find the file in your browser&rsquo;s downloads.</p>
+    </div>
+  </section>
+
+  <section class="step">
+    <div class="num">2</div>
+    <div>
+      <h2>Run the file you downloaded</h2>
+      <p>Windows may show <b>Windows protected your PC</b> because the app is not code-signed. Click <b>More info</b>, then <b>Run anyway</b>.</p>
+      <p>Keep &ldquo;Start Media Catcher when I sign in to Windows&rdquo; checked, then finish the setup.</p>
+    </div>
+  </section>
+
+  <section class="step">
+    <div class="num">3</div>
+    <div>
+      <h2>Wait for the tray icon near the clock</h2>
+      <p>The status below switches automatically once the app is running. The icon may be hidden under the <b>^</b> arrow.</p>
+    </div>
+  </section>
+
+  <div id="live" class="live wait"><span id="liveText">Waiting for the app...</span></div>
+
+  <section class="step" style="margin-top:12px">
+    <div class="num">4</div>
+    <div>
+      <h2>You&rsquo;re ready</h2>
+      <p>Open a page with a video, play it for a few seconds, then click the extension icon and pick the quality.</p>
+      <p>To reach it easily: click the puzzle icon 🧩 in the browser, then the pin 📌 next to Media Catcher.</p>
+    </div>
+  </section>
+
+  <p class="foot">Everything is downloaded on your own computer. If nothing shows up after installing, start <b>Media Catcher</b> from the Start menu.</p>
+</main>
+<script src="config.js"></script>
+<script src="welcome.js"></script>
+</body>
+</html>

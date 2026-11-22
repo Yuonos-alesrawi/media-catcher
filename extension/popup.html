@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<style>
+  body { width: 380px; font: 14px system-ui, sans-serif; margin: 0; padding: 12px; }
+  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  h1 { font-size: 15px; margin: 0; }
+  h2 { font-size: 13px; margin: 12px 0 6px; color: #444; display: flex; justify-content: space-between; align-items: center; }
+  #status { font-size: 12px; }
+  .ok { color: #15803d; } .bad { color: #b91c1c; }
+  .warn { white-space: pre-line; background: #fef3c7; border-radius: 6px; padding: 6px 8px; font-size: 12px; margin-bottom: 8px; }
+  .item, .job { border: 1px solid #ddd; border-radius: 8px; padding: 8px; margin-bottom: 8px; }
+  .url { direction: ltr; text-align: left; font-size: 11px; color: #555; word-break: break-all;
+         max-height: 32px; overflow: hidden; margin: 4px 0; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .tag { background: #e0e7ff; border-radius: 4px; padding: 1px 6px; font-size: 11px; }
+  .rec { color: #15803d; font-size: 11px; }
+  button { cursor: pointer; border: 0; border-radius: 6px; background: #2563eb; color: #fff; padding: 5px 12px; }
+  button:disabled { background: #9ca3af; cursor: default; }
+  button.link { background: none; color: #2563eb; padding: 0; font-size: 12px; }
+  .msg { font-size: 12px; margin-top: 4px; }
+  #empty { color: #666; text-align: center; padding: 10px 0; font-size: 12px; }
+  .jname { font-size: 13px; margin-bottom: 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .bar { height: 8px; background: #e5e7eb; border-radius: 4px; overflow: hidden; }
+  .fill { height: 100%; width: 0; background: #2563eb; transition: width .3s; }
+  .fill.done { background: #16a34a; }
+  .fill.err { background: #dc2626; }
+  .fill.indet { width: 40%; animation: slide 1.2s infinite linear; }
+  @keyframes slide { 0% { margin-inline-start: -40%; } 100% { margin-inline-start: 100%; } }
+  .qrow { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; }
+  select { padding: 3px 6px; border-radius: 6px; border: 1px solid #ccc; }
+  .jlabel { font-size: 12px; color: #444; margin-top: 4px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Media Catcher</h1>
+    <span id="status">...</span>
+  </header>
+  <div id="warn" class="warn" hidden></div>
+
+  <div id="jobsBox" hidden>
+    <h2>Downloads <span><button id="clear" class="link">Clear finished</button> · <button id="clearAll" class="link">Clear all</button></span></h2>
+    <div id="jobs"></div>
+  </div>
+
+  <h2>This page</h2>
+  <div id="list"></div>
+  <div id="empty" hidden>No media detected. Refresh the page (F5), play the video for a few seconds, then reopen this popup.</div>
+  <script src="config.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
