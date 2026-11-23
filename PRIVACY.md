@@ -1,6 +1,6 @@
 # Privacy Policy - Media Catcher
 
-_Last updated: <date>_
+_Last updated: 11/23/2026
 
 Media Catcher does not collect, store on a server, sell or share any personal data.
 
@@ -27,4 +27,4 @@ No analytics, no tracking, no advertising, no accounts, no browsing history leav
 - `storage`: to remember your download list and settings.
 
 ## Contact
-<your e-mail or the URL of your GitHub issues page>
+younosalesrawi@gmail.com
