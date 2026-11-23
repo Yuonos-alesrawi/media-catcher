@@ -22,7 +22,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-APP_VERSION = "0.4.2"  # the extension compares this with minAppVersion in extension/config.js
+APP_VERSION = "0.4.3"  # the extension compares this with minAppVersion in extension/config.js
 
 BASE_DIR = (
     Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -112,6 +112,62 @@ def clean_error(e: Exception) -> str:
     return ANSI_RE.sub("", str(e)).strip()[:300]
 
 
+# (substrings to look for in the lower-cased error, message shown to the user). The first match wins,
+# so network problems are checked before anything else: their raw text also contains "unable to download".
+_ERROR_RULES = [
+    (("getaddrinfo failed", "failed to resolve", "name or service not known", "temporary failure in name resolution",
+      "nodename nor servname", "network is unreachable", "no route to host"),
+     "No internet connection. Check your connection and try again."),
+    (("timed out", "timeout"), "The connection timed out. Check your internet connection and try again."),
+    (("connection reset", "connection aborted", "remote end closed", "connection broken", "incompleteread"),
+     "The connection was interrupted. Try again."),
+    (("confirm you", "not a bot"), "YouTube asks you to sign in to prove you are not a bot. Try again later."),
+    (("unsupported url",), "This page is not supported directly. Play the video and use one of the detected files below."),
+    (("private video", "video is private"), "This video is private."),
+    (("members-only", "members only", "join this channel"), "This video is for channel members only."),
+    (("age-restricted", "confirm your age", "age restricted"), "This video is age-restricted. Sign in to the site first."),
+    (("not available in your country", "geo restrict", "geo-restrict", "geoblock"), "This video is not available in your country."),
+    (("video unavailable", "is unavailable", "has been removed", "no longer available"), "This video is unavailable."),
+    (("live event will begin", "premieres in", "will begin in"), "This live stream has not started yet."),
+    (("drm",), "This video is protected by DRM and cannot be downloaded."),
+    (("requested format is not available",), "That quality is not available for this video. Choose another quality."),
+    (("no space left", "errno 28"), "Your disk is full."),
+    (("permission denied",), "The app cannot write to the download folder (permission denied)."),
+]
+
+
+def friendly_error(raw: str) -> str:
+    """Turns a raw yt-dlp error into a short sentence a normal user can act on."""
+    low = raw.lower()
+    for needles, message in _ERROR_RULES:
+        if any(n in low for n in needles):
+            return message
+    m = re.search(r"http error (\d{3})", low)
+    if m:
+        code = int(m.group(1))
+        if code == 401:
+            return "This video needs you to sign in."
+        if code == 403:
+            return ("The site refused the download (HTTP 403). Play the video on the page and try again; "
+                    "if the site needs a login, sign in first.")
+        if code in (404, 410):
+            return f"The video link no longer works (HTTP {code}). Reload the page, play the video again and retry."
+        if code == 429:
+            return "Too many requests (HTTP 429). Wait a few minutes and try again."
+        if code >= 500:
+            return f"The site had a problem (HTTP {code}). Try again later."
+    if "ffmpeg" in low and ("not found" in low or "not installed" in low):
+        return "ffmpeg is missing, so audio and video cannot be merged."
+    short = re.sub(r"^error:\s*", "", raw.strip(), flags=re.I)
+    return short[:200] or "The download failed."
+
+
+def describe_error(e: Exception) -> tuple:
+    """Returns (friendly message, technical details)."""
+    raw = ANSI_RE.sub("", str(e)).strip()
+    return friendly_error(raw), raw[:600]
+
+
 def safe_name(s: Optional[str]) -> str:
     return re.sub(r'[\\/:*?"<>|%\n\r]', "_", s or "").strip()[:100] or "video"
 
@@ -130,7 +186,7 @@ def unique_path(path: Path) -> Path:
 def new_job() -> dict:
     return {
         "status": "queued", "percent": None, "speed": None, "eta": None,
-        "streams_done": 0, "no_audio": False, "cancel": False, "file": None, "error": None, "started_at": None, "height": None,
+        "streams_done": 0, "no_audio": False, "cancel": False, "file": None, "error": None, "error_detail": None, "started_at": None, "height": None,
     }
 
 
@@ -231,7 +287,8 @@ def run_job(job_id: str, req: DownloadReq) -> None:
         if job["cancel"]:
             job["status"] = "cancelled"
         else:
-            job.update(status="error", error=clean_error(e))
+            friendly, detail = describe_error(e)
+            job.update(status="error", error=friendly, error_detail=detail)
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
         try:

@@ -1,3 +1,6 @@
+// Chrome/Edge expose `chrome`, Firefox exposes `browser` (both return promises in Manifest V3).
+const ext = typeof browser !== "undefined" ? browser : chrome;
+
 const API = CONFIG.api;
 const $ = (id) => document.getElementById(id);
 const isWindows = /Windows/i.test(navigator.userAgent);
@@ -16,7 +19,7 @@ $("nonwin").hidden = isWindows;
 $("devwarn").hidden = !placeholder;
 $("download").disabled = placeholder;
 $("download").onclick = () => {
-  chrome.tabs.create({ url: CONFIG.installerUrl });
+  ext.tabs.create({ url: CONFIG.installerUrl });
   $("dlnote").hidden = false;
 };
 

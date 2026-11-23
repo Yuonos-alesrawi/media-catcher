@@ -1,3 +1,6 @@
+// Chrome/Edge expose `chrome`, Firefox exposes `browser` (both return promises in Manifest V3).
+const ext = typeof browser !== "undefined" ? browser : chrome;
+
 // config.js defines CONFIG. The fallback keeps the popup working even if config.js is missing.
 const CFG = typeof CONFIG !== "undefined" ? CONFIG : { api: "http://127.0.0.1:8765", minAppVersion: "0.0.0" };
 const API = CFG.api;
@@ -32,8 +35,8 @@ const QUALITY_OPTIONS = [
   ["480", "Up to 480p"], ["360", "Up to 360p"], ["audio", "Audio only (MP3)"],
 ];
 // ---------- Saved jobs (still visible when the popup is reopened) ----------
-async function loadJobs() { jobs = (await chrome.storage.local.get("jobs")).jobs || []; }
-function saveJobs() { jobs = jobs.slice(0, 20); return chrome.storage.local.set({ jobs }); }
+async function loadJobs() { jobs = (await ext.storage.local.get("jobs")).jobs || []; }
+function saveJobs() { jobs = jobs.slice(0, 20); return ext.storage.local.set({ jobs }); }
 
 // ---------- Helpers ----------
 function fmtSize(n) {
@@ -78,6 +81,7 @@ function drawJob(j) {
   else if (j.status === "unknown") text = "Unknown job (the app was restarted)";
   else text = "Failed: " + (j.error || "unknown error");
   e.label.textContent = text;
+  e.label.title = j.error_detail || "";  // technical details on hover
 }
 
 async function removeJob(id) {
@@ -154,7 +158,7 @@ function showInstallCard(title, text, btnText) {
     box.id = "offline";
     box.className = "offline";
     box.innerHTML = `<b></b><p class="t"></p><button></button><p class="small">Already installed? Start Media Catcher from the Start menu.</p>`;
-    box.querySelector("button").onclick = () => chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html") });
+    box.querySelector("button").onclick = () => ext.tabs.create({ url: ext.runtime.getURL("welcome.html") });
     $("warn").before(box);
   }
   box.querySelector("b").textContent = title;
@@ -284,7 +288,7 @@ function makeCard({ kind, quality, size, url, hint, hintWarn, savedQuality, onSe
   sel.innerHTML = opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join("");
   if (!fixed) {
     if (opts.some(([v]) => v === savedQuality)) sel.value = savedQuality;
-    sel.onchange = () => chrome.storage.local.set({ quality: sel.value });
+    sel.onchange = () => ext.storage.local.set({ quality: sel.value });
   }
 
   const btn = el.querySelector("button"), msg = el.querySelector(".msg");
@@ -298,9 +302,9 @@ function makeCard({ kind, quality, size, url, hint, hintWarn, savedQuality, onSe
   await loadJobs();
   drawAll();
   if (jobs.some((j) => !FINAL.includes(j.status))) ensurePolling();
-  const savedQuality = (await chrome.storage.local.get("quality")).quality;
+  const savedQuality = (await ext.storage.local.get("quality")).quality;
 
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
   let host = "";
   try { host = new URL(tab.url).hostname; } catch {}
   const pageTitle = tab.title || host || "video";
@@ -318,7 +322,7 @@ function makeCard({ kind, quality, size, url, hint, hintWarn, savedQuality, onSe
 
   // Detected media: merge duplicates (same file, new signature) and sort the highest quality first
   const k = `tab:${tab.id}`;
-  const list = (await chrome.storage.session.get(k))[k] || [];
+  const list = (await ext.storage.session.get(k))[k] || [];
   const byKey = new Map();
   for (const item of list) {
     const q = detectQuality(item.url);
