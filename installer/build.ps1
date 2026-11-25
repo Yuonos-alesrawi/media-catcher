@@ -4,7 +4,7 @@
   What it does:
     1. downloads the *embeddable* Python and installs the app's packages into it
     2. downloads ffmpeg and deno into a "bin" folder
-    3. copies server.py, app.py and the browser extension
+    3. copies server.py, sitefilter.py, app.py and the browser extension
     4. runs a smoke test, then compiles installer\setup.iss with Inno Setup (if installed)
 
   Requirements: Windows 10/11, PowerShell 5+, internet. Inno Setup 6.3+ for the final .exe.
@@ -176,6 +176,7 @@ Get-Tool "deno" "https://github.com/denoland/deno/releases/latest/download/deno-
 Step "App files"
 Copy-Item (Join-Path $Root "local_app\server.py") $App
 Copy-Item (Join-Path $Root "local_app\app.py") $App
+Copy-Item (Join-Path $Root "local_app\sitefilter.py") $App
 Copy-Item (Join-Path $PSScriptRoot "debug.bat") $App
 Copy-Item (Join-Path $PSScriptRoot "stop.bat") $App
 Copy-Item (Join-Path $Root "extension") (Join-Path $App "extension") -Recurse
