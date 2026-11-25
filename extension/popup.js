@@ -56,15 +56,17 @@ function drawJob(j) {
   if (!e) {
     const root = document.createElement("div");
     root.className = "job";
-    root.innerHTML = `<div class="jtop"><div class="jname"></div><button class="x" title="Remove">✕</button></div><div class="bar"><div class="fill"></div></div><div class="jlabel"></div>`;
-    e = { root, name: root.querySelector(".jname"), fill: root.querySelector(".fill"), label: root.querySelector(".jlabel") };
+    root.innerHTML = `<div class="jtop"><div class="jname"></div><button class="link rv" hidden>Show in folder</button><button class="x" title="Remove">✕</button></div><div class="bar"><div class="fill"></div></div><div class="jlabel"></div>`;
+    e = { root, name: root.querySelector(".jname"), fill: root.querySelector(".fill"), label: root.querySelector(".jlabel"), rv: root.querySelector(".rv") };
     root.querySelector(".x").onclick = () => removeJob(j.id);
+    e.rv.onclick = () => revealJob(j.id, e.rv);
     els.set(j.id, e);
     $("jobs").appendChild(root);
   }
   const known = typeof j.percent === "number";
   const final = FINAL.includes(j.status);
   e.name.textContent = j.title || "Video";
+  e.rv.hidden = j.status !== "done";
   e.fill.className = "fill" + (j.status === "done" ? " done" : final ? " err" : !known ? " indet" : "");
   e.fill.style.width = j.status === "done" ? "100%" : known ? j.percent + "%" : "";
 
@@ -82,6 +84,16 @@ function drawJob(j) {
   else text = "Failed: " + (j.error || "unknown error");
   e.label.textContent = text;
   e.label.title = j.error_detail || "";  // technical details on hover
+}
+
+async function revealJob(id, btn) {
+  try {
+    const r = await fetch(`${API}/jobs/${id}/reveal`, { method: "POST" });
+    if (!r.ok) throw new Error(r.status);
+  } catch {
+    btn.textContent = "File not found";
+    setTimeout(() => (btn.textContent = "Show in folder"), 2500);
+  }
 }
 
 async function removeJob(id) {
@@ -191,6 +203,15 @@ async function checkServer() {
   }
 }
 
+// ---------- Settings kept by the app (tray menu > Settings) ----------
+async function loadSettings() {
+  try {
+    const r = await fetch(`${API}/settings`);
+    if (r.ok) return await r.json();
+  } catch {}
+  return { default_quality: "best" };  // older app, or the app is not running
+}
+
 // ---------- Sending ----------
 // Label that tells similar downloads apart in the list (video or audio, which quality)
 function qualityTag(q) {
@@ -258,7 +279,7 @@ function shortUrl(url) {
 
 // quality != null  =>  fixed quality (a single file), so choosing another quality is meaningless:
 // the only options are the file as it is, or audio only.
-function makeCard({ kind, quality, size, url, hint, hintWarn, savedQuality, onSend }) {
+function makeCard({ kind, quality, size, url, hint, hintWarn, defaultQuality, onSend }) {
   const info = KIND_INFO[kind] || { name: kind.toUpperCase(), desc: "" };
   const fixed = quality != null;
   const el = document.createElement("div");
@@ -286,10 +307,9 @@ function makeCard({ kind, quality, size, url, hint, hintWarn, savedQuality, onSe
     ? [["best", `This quality (${quality}p)`], ["audio", "Audio only (MP3)"]]
     : QUALITY_OPTIONS;
   sel.innerHTML = opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join("");
-  if (!fixed) {
-    if (opts.some(([v]) => v === savedQuality)) sel.value = savedQuality;
-    sel.onchange = () => ext.storage.local.set({ quality: sel.value });
-  }
+  // The default quality is chosen in the tray menu (Settings). Changing it here affects this download only.
+  if (fixed) sel.value = defaultQuality === "audio" ? "audio" : "best";
+  else if (opts.some(([v]) => v === defaultQuality)) sel.value = defaultQuality;
 
   const btn = el.querySelector("button"), msg = el.querySelector(".msg");
   btn.onclick = () => onSend(btn, msg, sel.value);
@@ -302,7 +322,7 @@ function makeCard({ kind, quality, size, url, hint, hintWarn, savedQuality, onSe
   await loadJobs();
   drawAll();
   if (jobs.some((j) => !FINAL.includes(j.status))) ensurePolling();
-  const savedQuality = (await ext.storage.local.get("quality")).quality;
+  const defaultQuality = (await loadSettings()).default_quality;
 
   const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
   let host = "";
@@ -313,7 +333,7 @@ function makeCard({ kind, quality, size, url, hint, hintWarn, savedQuality, onSe
   if (/^https?:/.test(tab.url || "")) {
     const recommended = PAGE_SITES.test(host);
     $("list").appendChild(makeCard({
-      kind: "page", quality: null, url: tab.url, savedQuality,
+      kind: "page", quality: null, url: tab.url, defaultQuality,
       hint: recommended ? "Recommended for this site" : "yt-dlp may not support it",
       hintWarn: !recommended,
       onSend: (btn, msg, q) => send({ url: tab.url, headers: {} }, "", pageTitle, btn, msg, q),
@@ -346,7 +366,7 @@ function makeCard({ kind, quality, size, url, hint, hintWarn, savedQuality, onSe
     // Add the quality to the name so one quality never replaces another
     const title = q ? `${pageTitle} - ${q}p` : pageTitle;
     $("list").appendChild(makeCard({
-      kind: item.kind, quality: q, size: fmtSize(item.size), url: item.url, savedQuality,
+      kind: item.kind, quality: q, size: fmtSize(item.size), url: item.url, defaultQuality,
       onSend: (btn, msg, qual) => send(item, title, title, btn, msg, qual),
     }));
   }

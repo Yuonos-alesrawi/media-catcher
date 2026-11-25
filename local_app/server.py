@@ -6,30 +6,31 @@ For development:  pip install fastapi uvicorn "yt-dlp[default]"
 It looks for ffmpeg and deno next to this file, then in the bin folder, then in PATH.
 """
 import importlib.util
+import json
 import os
 import queue
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import yt_dlp
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-APP_VERSION = "0.4.3"  # the extension compares this with minAppVersion in extension/config.js
+APP_VERSION = "0.5.0"  # the extension compares this with minAppVersion in extension/config.js
 
 BASE_DIR = (
     Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 )
-DOWNLOAD_DIR = Path.home() / "Downloads" / "MediaCatcher"
-DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
 
 # The bin folder (placed by the installer) holds ffmpeg and deno: add it to PATH so yt-dlp finds them
 BIN_DIRS = [BASE_DIR / "bin", BASE_DIR.parent / "bin"]
@@ -55,6 +56,80 @@ HAS_CRYPTO = any(importlib.util.find_spec(m) for m in ("Cryptodome", "Crypto"))
 
 QUALITIES = {"best", "2160", "1440", "1080", "720", "480", "360", "240", "audio"}
 
+# ---------------------------------------------------------------- settings (download folder, default quality, notifications)
+DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".media-catcher") / "MediaCatcher"
+SETTINGS_FILE = DATA_DIR / "settings.json"
+DEFAULT_DOWNLOAD_DIR = Path.home() / "Downloads" / "MediaCatcher"
+_settings_lock = threading.Lock()
+
+
+def _read_settings() -> dict:
+    s = {"download_dir": str(DEFAULT_DOWNLOAD_DIR), "default_quality": "best", "notify": True}
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return s
+    if isinstance(data.get("download_dir"), str) and data["download_dir"].strip():
+        s["download_dir"] = data["download_dir"].strip()
+    if data.get("default_quality") in QUALITIES:
+        s["default_quality"] = data["default_quality"]
+    if isinstance(data.get("notify"), bool):
+        s["notify"] = data["notify"]
+    return s
+
+
+def _ensure_writable_dir(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".write-test"
+        probe.write_text("ok")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+_settings = _read_settings()
+DOWNLOAD_DIR = Path(_settings["download_dir"])
+if not _ensure_writable_dir(DOWNLOAD_DIR):  # the saved folder vanished or is not writable: use the default
+    DOWNLOAD_DIR = DEFAULT_DOWNLOAD_DIR
+    _settings["download_dir"] = str(DOWNLOAD_DIR)
+    _ensure_writable_dir(DOWNLOAD_DIR)
+
+
+def get_settings() -> dict:
+    with _settings_lock:
+        return dict(_settings)
+
+
+def set_settings(**changes) -> dict:
+    """Validates and saves settings. Unknown keys are ignored. Raises ValueError for a bad value."""
+    global DOWNLOAD_DIR
+    with _settings_lock:
+        new = dict(_settings)
+        if "download_dir" in changes:
+            p = Path(str(changes["download_dir"]).strip())
+            if not p.is_absolute():
+                raise ValueError("The download folder must be a full path.")
+            if not _ensure_writable_dir(p):
+                raise ValueError("Cannot write to that folder.")
+            new["download_dir"] = str(p)
+        if "default_quality" in changes:
+            if changes["default_quality"] not in QUALITIES:
+                raise ValueError("Unknown quality.")
+            new["default_quality"] = changes["default_quality"]
+        if "notify" in changes:
+            new["notify"] = bool(changes["notify"])
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            SETTINGS_FILE.write_text(json.dumps(new, indent=2), encoding="utf-8")
+        except OSError:
+            pass  # keep working with the in-memory settings
+        _settings.update(new)
+        DOWNLOAD_DIR = Path(new["download_dir"])
+        return dict(new)
+
+
 
 def format_for(quality: str) -> str:
     if quality == "audio":
@@ -79,7 +154,38 @@ def sort_for(quality: str) -> list:
     return fields
 
 app = FastAPI()
-# Only browser-extension origins are allowed, so web pages cannot talk to the app
+
+# --- Who may talk to this app -------------------------------------------------------------------
+# Only the browser extension: web pages are refused, and so are requests whose Host header is not localhost
+# (that is what a DNS-rebinding attack looks like).
+ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+# After the stores give your extension its id (Edge / Chrome / Opera), list the ids here to accept only them.
+# Empty = any Chromium extension. Firefox cannot be pinned: it gives every install a random moz-extension id.
+CHROMIUM_EXTENSION_IDS: list = []
+
+
+def origin_allowed(origin: str) -> bool:
+    if origin.startswith("moz-extension://"):
+        return True
+    if origin.startswith("chrome-extension://"):
+        return not CHROMIUM_EXTENSION_IDS or origin[len("chrome-extension://"):].rstrip("/") in CHROMIUM_EXTENSION_IDS
+    return False
+
+
+def check_request(method: str, host: Optional[str], origin: Optional[str]) -> Optional[str]:
+    """Returns the reason to refuse a request, or None when it may go on."""
+    h = (host or "").strip().lower()
+    name = h[:h.rindex(":")] if ":" in h and not h.endswith("]") else h  # drop the port
+    if name not in ALLOWED_HOSTS:
+        return "Invalid Host header"
+    if origin is None:
+        # Browsers always send Origin on cross-origin POST/DELETE, so a state-changing request without it is not ours
+        return None if method in ("GET", "HEAD") else "Missing Origin header"
+    if not origin_allowed(origin):
+        return "Origin not allowed"
+    return None
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^(chrome|moz)-extension://.*$",
@@ -87,11 +193,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")  # added after CORS, so it runs first
+async def guard(request, call_next):
+    reason = check_request(request.method, request.headers.get("host"), request.headers.get("origin"))
+    if reason:
+        return JSONResponse({"detail": reason}, status_code=403)
+    return await call_next(request)
+
+
 jobs: dict = {}
 tasks: "queue.Queue" = queue.Queue()
 # Cleared while yt-dlp is being updated, so no job starts while files are being replaced
 accepting = threading.Event()
 accepting.set()
+# Functions called as fn(job_id, job) when a job finishes or fails (the tray app uses this for notifications)
+job_listeners: list = []
+
+
+def _emit(job_id: str, job: dict) -> None:
+    for fn in list(job_listeners):
+        try:
+            fn(job_id, job)
+        except Exception as e:  # noqa: BLE001
+            print("job listener failed:", e)
+
 
 class Cancelled(Exception):
     pass
@@ -186,7 +312,7 @@ def unique_path(path: Path) -> Path:
 def new_job() -> dict:
     return {
         "status": "queued", "percent": None, "speed": None, "eta": None,
-        "streams_done": 0, "no_audio": False, "cancel": False, "file": None, "error": None, "error_detail": None, "started_at": None, "height": None,
+        "streams_done": 0, "no_audio": False, "cancel": False, "file": None, "path": None, "error": None, "error_detail": None, "started_at": None, "height": None,
     }
 
 
@@ -236,8 +362,8 @@ def run_job(job_id: str, req: DownloadReq) -> None:
     # Every job works in its own temp folder. When extracting audio, yt-dlp deletes the original file it
     # downloaded - and if that file were a video downloaded earlier under the same name, it would be deleted!
     # Isolating each job prevents this completely.
-    work_dir = DOWNLOAD_DIR / ".tmp" / job_id
-    work_dir.mkdir(parents=True, exist_ok=True)
+    dl_dir = DOWNLOAD_DIR  # the folder chosen when this job started
+    work_dir = dl_dir / ".tmp" / job_id
     opts = {
         "outtmpl": f"{name}.%(ext)s",
         "paths": {"home": str(work_dir)},
@@ -262,6 +388,7 @@ def run_job(job_id: str, req: DownloadReq) -> None:
         ]
 
     try:
+        work_dir.mkdir(parents=True, exist_ok=True)
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(req.url, download=True)
         files = (info or {}).get("requested_downloads") or []
@@ -273,10 +400,11 @@ def run_job(job_id: str, req: DownloadReq) -> None:
             src = max(cands, key=lambda f: f.stat().st_size) if cands else None
         if src is None:
             raise RuntimeError("yt-dlp did not produce any file")
-        dst = unique_path(DOWNLOAD_DIR / src.name)  # never overwrite an existing file
+        dst = unique_path(dl_dir / src.name)  # never overwrite an existing file
         shutil.move(str(src), str(dst))
 
         job["file"] = dst.name
+        job["path"] = str(dst)
         sides = [v for v in (first.get("width"), first.get("height")) if v]
         job["height"] = min(sides) if sides else None
         job["no_audio"] = req.quality != "audio" and first.get("acodec") in (None, "none")
@@ -292,16 +420,22 @@ def run_job(job_id: str, req: DownloadReq) -> None:
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
         try:
-            (DOWNLOAD_DIR / ".tmp").rmdir()  # removed if empty
+            (dl_dir / ".tmp").rmdir()  # removed if empty
         except OSError:
             pass
+    if job["status"] in ("done", "error"):
+        _emit(job_id, job)
 
 
 def worker():
     while True:
         job_id, req = tasks.get()
         accepting.wait()
-        run_job(job_id, req)
+        try:
+            run_job(job_id, req)
+        except Exception as e:  # noqa: BLE001 - a bug in one job must never kill the worker
+            print(f"[{job_id}] unexpected error:", repr(e))
+            jobs[job_id].update(status="error", error="Unexpected error in the app.", error_detail=repr(e)[:600])
         tasks.task_done()
 
 
@@ -315,6 +449,9 @@ def health():
 
 @app.post("/download")
 def download(req: DownloadReq):
+    if urlparse(req.url).scheme not in ("http", "https"):  # never let yt-dlp read local files (file://)
+        raise HTTPException(status_code=400, detail="Only http and https links are supported.")
+    req.headers = {str(k): str(v) for k, v in (req.headers or {}).items() if "\n" not in str(v) and "\r" not in str(v)}
     job_id = uuid.uuid4().hex[:8]
     jobs[job_id] = new_job()
     tasks.put((job_id, req))
@@ -342,3 +479,30 @@ def remove_job(job_id: str):
 def active_jobs() -> int:
     """Number of jobs that have not finished yet (waiting or running)."""
     return sum(1 for j in jobs.values() if j["status"] in ("queued", "downloading", "processing"))
+
+
+def reveal_in_folder(path: Path) -> None:
+    if os.name == "nt":
+        subprocess.Popen(f'explorer /select,"{path}"')  # one string: explorer needs /select,"path" as a single token
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(path.parent)])
+
+
+@app.post("/jobs/{job_id}/reveal")
+def reveal_job(job_id: str):
+    """Opens the folder with the finished file selected. Only files this app produced can be shown."""
+    j = jobs.get(job_id)
+    if not j or j["status"] != "done" or not j.get("path"):
+        raise HTTPException(status_code=404, detail="Nothing to show for this job.")
+    path = Path(j["path"])
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="The file was moved or deleted.")
+    reveal_in_folder(path)
+    return {"ok": True}
+
+
+@app.get("/settings")
+def read_settings():
+    return get_settings()

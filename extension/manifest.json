@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Media Catcher",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Detects video links (HLS/DASH/MP4) with their headers and sends them to the local download app.",
   "icons": {
     "16": "icons/icon16.png",

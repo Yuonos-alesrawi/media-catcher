@@ -13,7 +13,9 @@ import sys
 import threading
 import time
 import traceback
+import webbrowser
 from pathlib import Path
+from typing import Optional
 
 APP_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(APP_DIR))
@@ -29,6 +31,11 @@ UPDATE_EVERY = 24 * 3600  # update yt-dlp once a day
 RETRY_AFTER = 6 * 3600    # if the update fails (no internet) retry after 6 hours
 IDLE_POLL = 5             # seconds between checks that downloads have finished, before updating
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+# Page of the extension in the browser store. Once it is published, put the link here:
+# "Advanced > Install the browser extension" then opens it. Empty = open the local extension folder.
+EXTENSION_URL = ""
+QUALITY_LABELS = [("best", "Best quality"), ("1080", "Up to 1080p"), ("720", "Up to 720p"),
+                  ("480", "Up to 480p"), ("360", "Up to 360p"), ("audio", "Audio only (MP3)")]
 
 
 # ---------------------------------------------------------------- Logging
@@ -162,6 +169,28 @@ def set_autostart(on: bool) -> None:
                 pass
 
 
+def choose_folder(initial: str) -> Optional[str]:
+    """Shows the Windows folder picker (through PowerShell, so no extra packages are needed).
+    Returns the chosen folder, or None if the user cancelled."""
+    if not IS_WIN:
+        return None
+    script = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;"
+              "Add-Type -AssemblyName System.Windows.Forms;"
+              "$owner = New-Object System.Windows.Forms.Form; $owner.TopMost = $true;"
+              "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+              "$d.Description = 'Choose where Media Catcher saves downloads';"
+              "$d.SelectedPath = $env:MC_INITIAL;"
+              "if ($d.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.SelectedPath) }")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-STA", "-Command", script], capture_output=True, text=True,
+                           encoding="utf-8", timeout=600, env=dict(os.environ, MC_INITIAL=initial),
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+    except Exception as e:  # noqa: BLE001
+        print("folder picker failed:", e)
+        return None
+    return (r.stdout or "").strip() or None
+
+
 def make_icon_image():
     """Tray icon: a blue square with a white download arrow (drawn in code, no image files)."""
     from PIL import Image, ImageDraw
@@ -243,6 +272,7 @@ class Controller:
         self.auto_update = auto_update
         self.icon = None
         self._update_lock = threading.Lock()
+        srv.mod.job_listeners.append(self._on_job)  # tray notification when a download ends
 
     # -- info
     @property
@@ -257,7 +287,7 @@ class Controller:
         if not msg or self.icon is None:
             return
         try:
-            self.icon.notify(msg, "Media Catcher")
+            self.icon.notify(msg[:250], "Media Catcher")
         except Exception as e:  # noqa: BLE001
             print("notify failed:", e)
 
@@ -266,7 +296,10 @@ class Controller:
         open_path(self.srv.mod.DOWNLOAD_DIR)
 
     def open_extension(self, icon=None, item=None):
-        open_path(APP_DIR / "extension")
+        if EXTENSION_URL:
+            webbrowser.open(EXTENSION_URL)
+        else:
+            open_path(APP_DIR / "extension")
 
     def open_log(self, icon=None, item=None):
         if LOG_FILE.exists():
@@ -277,6 +310,41 @@ class Controller:
             set_autostart(not autostart_enabled())
         except Exception as e:  # noqa: BLE001
             print("autostart failed:", e)
+
+    # -- settings
+    def change_folder(self, icon=None, item=None):
+        threading.Thread(target=self._change_folder, daemon=True).start()  # the dialog must not block the tray
+
+    def _change_folder(self) -> None:
+        mod = self.srv.mod
+        picked = choose_folder(str(mod.DOWNLOAD_DIR))
+        if not picked:
+            return
+        try:
+            mod.set_settings(download_dir=picked)
+        except ValueError as e:
+            self.notify(str(e))
+            return
+        self.notify(f"Downloads will now be saved to {picked}")
+
+    def quality_action(self, value: str):
+        def action(icon, item):
+            self.srv.mod.set_settings(default_quality=value)
+        return action
+
+    def quality_checked(self, value: str):
+        return lambda item: self.srv.mod.get_settings()["default_quality"] == value
+
+    def toggle_notify(self, icon=None, item=None):
+        self.srv.mod.set_settings(notify=not self.srv.mod.get_settings()["notify"])
+
+    def _on_job(self, job_id: str, job: dict) -> None:
+        if not self.srv.mod.get_settings().get("notify", True):
+            return
+        if job.get("status") == "done":
+            self.notify(f"Download finished: {job.get('file') or 'file'}")
+        elif job.get("status") == "error":
+            self.notify(f"Download failed: {job.get('error') or 'unknown error'}")
 
     def manual_update(self, icon=None, item=None):
         threading.Thread(target=self.run_update, args=(True,), daemon=True).start()
@@ -324,16 +392,31 @@ class Controller:
     def run_tray(self) -> None:
         import pystray
         Item = pystray.MenuItem
-        menu = pystray.Menu(
+        Menu = pystray.Menu
+        quality_items = [Item(label, self.quality_action(value), checked=self.quality_checked(value), radio=True)
+                         for value, label in QUALITY_LABELS]
+        menu = Menu(
             Item(lambda i: f"Media Catcher v{self.version}", None, enabled=False),
             Item(lambda i: self.status_text(), None, enabled=False),
-            pystray.Menu.SEPARATOR,
+            Menu.SEPARATOR,
             Item("Open downloads folder", self.open_downloads, default=True),
-            Item("Update yt-dlp now", self.manual_update),
             Item("Start with Windows", self.toggle_autostart, checked=lambda i: autostart_enabled(), visible=IS_WIN),
-            Item("Extension folder", self.open_extension),
-            Item("View log", self.open_log),
-            pystray.Menu.SEPARATOR,
+            Item("Update yt-dlp now", self.manual_update),
+            Menu.SEPARATOR,
+            Item("Settings", Menu(
+                Item("Change download folder...", self.change_folder),
+                Menu.SEPARATOR,
+                Item("Default quality", None, enabled=False),
+                *quality_items,
+                Menu.SEPARATOR,
+                Item("Notify when a download finishes", self.toggle_notify,
+                     checked=lambda i: self.srv.mod.get_settings()["notify"]),
+            )),
+            Item("Advanced", Menu(
+                Item("Install the browser extension", self.open_extension),
+                Item("View log", self.open_log),
+            )),
+            Menu.SEPARATOR,
             Item("Quit", self.quit),
         )
         self.icon = pystray.Icon("MediaCatcher", make_icon_image(), "Media Catcher", menu)

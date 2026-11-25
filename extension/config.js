@@ -6,7 +6,7 @@ const CONFIG = {
   installerUrl: "https://github.com/Yuonos-alesrawi/media-catcher/releases/latest/download/MediaCatcher-Setup.exe",
 
   // Oldest app version this extension works with. If the user's app is older, they are asked to update it.
-  minAppVersion: "0.4.2",
+  minAppVersion: "0.5.0",
 
   // Address of the local app
   api: "http://127.0.0.1:8765",
