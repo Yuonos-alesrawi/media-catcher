@@ -26,6 +26,7 @@ It looks for ffmpeg and deno next to this file, then in the bin folder, then in 
 import importlib.util
 import json
 import os
+import hashlib
 import queue
 import re
 import shutil
@@ -36,15 +37,16 @@ import time
 import uuid
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
+import sitefilter
 import yt_dlp
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-APP_VERSION = "0.5.0"  # the extension compares this with minAppVersion in extension/config.js
+APP_VERSION = "0.6.0"  # the extension compares this with minAppVersion in extension/config.js
 
 BASE_DIR = (
     Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -79,6 +81,11 @@ DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".media-catcher"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 DEFAULT_DOWNLOAD_DIR = Path.home() / "Downloads" / "MediaCatcher"
 _settings_lock = threading.Lock()
+# Optional lists the user can edit (one domain per line): blocked_sites.txt are always refused,
+# allowed_sites.txt are trusted (they skip the keyword and unsafe-link checks).
+BLOCKED_FILE = DATA_DIR / "blocked_sites.txt"
+ALLOWED_FILE = DATA_DIR / "allowed_sites.txt"
+RESUME_KEEP_DAYS = 7  # unfinished downloads older than this are deleted at startup
 
 
 def _read_settings() -> dict:
@@ -221,6 +228,7 @@ async def guard(request, call_next):
 
 
 jobs: dict = {}
+_submit_lock = threading.Lock()
 tasks: "queue.Queue" = queue.Queue()
 # Cleared while yt-dlp is being updated, so no job starts while files are being replaced
 accepting = threading.Event()
@@ -246,6 +254,7 @@ class DownloadReq(BaseModel):
     headers: dict = {}
     title: Optional[str] = ""  # empty = use the video title that yt-dlp extracts
     page_url: Optional[str] = ""
+    tab_url: Optional[str] = ""  # the page the user is on; checked by the site filter
     quality: Optional[str] = "best"  # best | 2160 | 1080 | 720 | 480 | 360 | 240 | audio
 
 
@@ -327,10 +336,52 @@ def unique_path(path: Path) -> Path:
     return path
 
 
+def site_check(req: "DownloadReq", resolved: Optional[dict] = None) -> Optional[str]:
+    """Returns the reason to refuse this download (adult / unsafe site), or None. Lists are re-read each time,
+    so edits to blocked_sites.txt / allowed_sites.txt apply immediately."""
+    extra_blocked = sitefilter.load_domain_list(BLOCKED_FILE)
+    allowed = sitefilter.load_domain_list(ALLOWED_FILE)
+    if resolved is None:
+        return sitefilter.check_download(req.url, tab_url=req.tab_url or "", page_url=req.page_url or "",
+                                         headers=req.headers, extra_blocked=extra_blocked, allowed=allowed)
+    # The page yt-dlp really resolved: a video on a neutral CDN may belong to an adult page
+    for key in ("webpage_url", "original_url"):
+        page = resolved.get(key)
+        if page:
+            why = sitefilter.check_download("", page_url=page, extra_blocked=extra_blocked, allowed=allowed)
+            if why:
+                return why
+    return None
+
+
+def resume_key(req: "DownloadReq", quality: str) -> str:
+    """Same video + same quality = same key. Pressing Download again after a failure finds the partial files
+    of the earlier attempt. For a detected file the query string is ignored (the signature changes every time);
+    for a page link (no title) the whole link counts, because the video id lives in the query (watch?v=...)."""
+    if req.title:
+        parts = urlsplit(req.url)
+        ident = f"{parts.scheme}://{parts.netloc}{parts.path}|{req.title}"
+    else:
+        ident = req.url
+    return hashlib.sha1(f"{ident}|{quality}".encode("utf-8")).hexdigest()[:16]
+
+
+def cleanup_old_partials() -> None:
+    """Deletes leftovers of failed downloads that nobody resumed."""
+    tmp = DOWNLOAD_DIR / ".tmp"
+    try:
+        for d in tmp.iterdir():
+            if d.is_dir() and time.time() - d.stat().st_mtime > RESUME_KEEP_DAYS * 86400:
+                shutil.rmtree(d, ignore_errors=True)
+        tmp.rmdir()  # only works when empty
+    except OSError:
+        pass
+
+
 def new_job() -> dict:
     return {
         "status": "queued", "percent": None, "speed": None, "eta": None,
-        "streams_done": 0, "no_audio": False, "cancel": False, "file": None, "path": None, "error": None, "error_detail": None, "started_at": None, "height": None,
+        "streams_done": 0, "no_audio": False, "cancel": False, "file": None, "path": None, "error": None, "error_detail": None, "started_at": None, "height": None, "resumed": False,
     }
 
 
@@ -377,11 +428,15 @@ def run_job(job_id: str, req: DownloadReq) -> None:
     q = req.quality if req.quality in QUALITIES else "best"
     if q != "best":  # a different name per quality, so yt-dlp never skips the file as "already downloaded"
         name += f" [{q}p]" if q.isdigit() else f" [{q}]"
-    # Every job works in its own temp folder. When extracting audio, yt-dlp deletes the original file it
+    # Every download works in its own temp folder. When extracting audio, yt-dlp deletes the original file it
     # downloaded - and if that file were a video downloaded earlier under the same name, it would be deleted!
-    # Isolating each job prevents this completely.
+    # Isolating each download prevents this completely.
+    # The folder is named after the video (not the job), so after a failure the partial files are still there
+    # and pressing Download again continues where it stopped.
     dl_dir = DOWNLOAD_DIR  # the folder chosen when this job started
-    work_dir = dl_dir / ".tmp" / job_id
+    work_dir = dl_dir / ".tmp" / resume_key(req, q)
+    job["resumed"] = work_dir.is_dir() and any(work_dir.iterdir())
+    keep_partial = False
     opts = {
         "outtmpl": f"{name}.%(ext)s",
         "paths": {"home": str(work_dir)},
@@ -397,6 +452,11 @@ def run_job(job_id: str, req: DownloadReq) -> None:
         "postprocessor_hooks": [pp_hook],
         "noplaylist": True,
         "quiet": True,
+        "continuedl": True,        # continue a half-downloaded file instead of starting over
+        "nopart": False,           # keep the .part file while downloading (this is what makes resuming possible)
+        "retries": 10,             # network hiccups are retried inside the same download
+        "fragment_retries": 10,
+        "file_access_retries": 3,
     }
     if FFMPEG_DIR:
         opts["ffmpeg_location"] = FFMPEG_DIR
@@ -408,7 +468,12 @@ def run_job(job_id: str, req: DownloadReq) -> None:
     try:
         work_dir.mkdir(parents=True, exist_ok=True)
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(req.url, download=True)
+            # Resolve first, check the real page, and only then download
+            resolved = ydl.extract_info(req.url, download=False)
+            why = site_check(req, resolved or {})
+            if why:
+                raise sitefilter.Blocked(why)
+            info = ydl.process_ie_result(resolved, download=True)
         files = (info or {}).get("requested_downloads") or []
         first = files[0] if files else {}
 
@@ -429,14 +494,18 @@ def run_job(job_id: str, req: DownloadReq) -> None:
         print(f"[{job_id}] format={first.get('format_id')} {job['height']}p "
               f"v={first.get('vcodec')} a={first.get('acodec')} -> {job['file']}")
         job.update(status="done", percent=100, speed=None, eta=None)
+    except sitefilter.Blocked as e:
+        job.update(status="error", error=str(e), error_detail="blocked by the site filter")
     except Exception as e:  # noqa: BLE001
         if job["cancel"]:
             job["status"] = "cancelled"
         else:
             friendly, detail = describe_error(e)
             job.update(status="error", error=friendly, error_detail=detail)
+            keep_partial = True  # the next Download press for the same video continues from here
     finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
+        if not keep_partial:
+            shutil.rmtree(work_dir, ignore_errors=True)
         try:
             (dl_dir / ".tmp").rmdir()  # removed if empty
         except OSError:
@@ -457,6 +526,7 @@ def worker():
         tasks.task_done()
 
 
+cleanup_old_partials()
 threading.Thread(target=worker, daemon=True).start()
 
 
@@ -470,9 +540,20 @@ def download(req: DownloadReq):
     if urlparse(req.url).scheme not in ("http", "https"):  # never let yt-dlp read local files (file://)
         raise HTTPException(status_code=400, detail="Only http and https links are supported.")
     req.headers = {str(k): str(v) for k, v in (req.headers or {}).items() if "\n" not in str(v) and "\r" not in str(v)}
-    job_id = uuid.uuid4().hex[:8]
-    jobs[job_id] = new_job()
-    tasks.put((job_id, req))
+    why = site_check(req)  # adult / unsafe sites are refused before anything is queued
+    if why:
+        raise HTTPException(status_code=403, detail=why)
+    q = req.quality if req.quality in QUALITIES else "best"
+    key = resume_key(req, q)
+    with _submit_lock:
+        # The same video is already waiting or downloading: do not start a second copy writing the same files
+        for jid, j in jobs.items():
+            if j.get("key") == key and j["status"] in ("queued", "downloading", "processing") and not j["cancel"]:
+                return {"id": jid, "existing": True}
+        job_id = uuid.uuid4().hex[:8]
+        jobs[job_id] = new_job()
+        jobs[job_id]["key"] = key
+        tasks.put((job_id, req))
     return {"id": job_id}
 
 

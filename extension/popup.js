@@ -72,16 +72,16 @@ function drawJob(j) {
 
   let text;
   if (j.offline && !final) text = "Could not reach the local app";
-  else if (j.status === "queued") text = "Waiting...";
+  else if (j.status === "queued") text = j.resumed ? "Waiting... (will continue the earlier download)" : "Waiting...";
   else if (j.status === "downloading")
-    text = known
+    text = (j.resumed ? "Resumed · " : "") + (known
       ? [`${Math.floor(j.percent)}%`, fmtSpeed(j.speed), j.eta != null ? fmtEta(j.eta) + " left" : ""].filter(Boolean).join(" · ")
-      : `Downloading... ${fmtEta(j.started_at ? Date.now() / 1000 - j.started_at : null)} elapsed (progress is not available for this video)`;
+      : `Downloading... ${fmtEta(j.started_at ? Date.now() / 1000 - j.started_at : null)} elapsed (progress is not available for this video)`);
   else if (j.status === "processing") text = "Merging audio and video...";
   else if (j.status === "done") text = "Done ✓ " + (j.file || j.title || "") + (j.height ? ` (${j.height}p)` : "") + (j.no_audio ? " ⚠ no audio track" : "");
   else if (j.status === "cancelled") text = "Cancelled";
   else if (j.status === "unknown") text = "Unknown job (the app was restarted)";
-  else text = "Failed: " + (j.error || "unknown error");
+  else text = "Failed: " + (j.error || "unknown error") + (j.error_detail === "blocked by the site filter" ? "" : " — press Download again to continue.");
   e.label.textContent = text;
   e.label.title = j.error_detail || "";  // technical details on hover
 }
@@ -220,7 +220,7 @@ function qualityTag(q) {
   return "";
 }
 
-async function send(item, serverTitle, displayTitle, btn, msg, quality) {
+async function send(item, serverTitle, displayTitle, btn, msg, quality, tabUrl) {
   btn.disabled = true;
   msg.className = "msg";
   msg.textContent = "Sending...";
@@ -228,15 +228,31 @@ async function send(item, serverTitle, displayTitle, btn, msg, quality) {
     const r = await fetch(`${API}/download`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: item.url, headers: item.headers || {}, title: serverTitle, page_url: item.frameUrl || "", quality }),
+      body: JSON.stringify({ url: item.url, headers: item.headers || {}, title: serverTitle, page_url: item.frameUrl || "", tab_url: tabUrl || "", quality }),
     });
+    if (r.status === 403 || r.status === 400) {
+      // The app refused this link (adult or unsafe site): show its reason
+      const d = await r.json().catch(() => ({}));
+      msg.textContent = typeof d.detail === "string" ? d.detail : "The app refused this download.";
+      msg.className = "msg bad";
+      setTimeout(() => (btn.disabled = false), 1500);
+      return;
+    }
     if (!r.ok) throw new Error(r.status);
-    const { id } = await r.json();
-    jobs.unshift({ id, title: displayTitle + qualityTag(quality), status: "queued", percent: null });
+    const { id, existing } = await r.json();
+    if (existing) {
+      // The same video is already downloading: do not add a second card
+      msg.textContent = "This download is already in progress";
+    } else {
+      // A failed card for the same video is replaced by the new attempt (which continues where it stopped)
+      const title = displayTitle + qualityTag(quality);
+      jobs = jobs.filter((j) => !(j.status === "error" && j.title === title));
+      jobs.unshift({ id, title, status: "queued", percent: null });
+      msg.textContent = "Added to downloads";
+    }
     await saveJobs();
     drawAll();
     ensurePolling();
-    msg.textContent = "Added to downloads";
   } catch {
     msg.textContent = "Could not reach the local app";
     msg.className = "msg bad";
@@ -336,7 +352,7 @@ function makeCard({ kind, quality, size, url, hint, hintWarn, defaultQuality, on
       kind: "page", quality: null, url: tab.url, defaultQuality,
       hint: recommended ? "Recommended for this site" : "yt-dlp may not support it",
       hintWarn: !recommended,
-      onSend: (btn, msg, q) => send({ url: tab.url, headers: {} }, "", pageTitle, btn, msg, q),
+      onSend: (btn, msg, q) => send({ url: tab.url, headers: {} }, "", pageTitle, btn, msg, q, tab.url),
     }));
   }
 
@@ -367,7 +383,7 @@ function makeCard({ kind, quality, size, url, hint, hintWarn, defaultQuality, on
     const title = q ? `${pageTitle} - ${q}p` : pageTitle;
     $("list").appendChild(makeCard({
       kind: item.kind, quality: q, size: fmtSize(item.size), url: item.url, defaultQuality,
-      onSend: (btn, msg, qual) => send(item, title, title, btn, msg, qual),
+      onSend: (btn, msg, qual) => send(item, title, title, btn, msg, qual, tab.url),
     }));
   }
 })();
