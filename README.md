@@ -55,3 +55,6 @@ Installer: [RELEASE.md](RELEASE.md). Extension: [PUBLISHING.md](PUBLISHING.md).
  
 > DRM-protected content is not supported. Users are responsible for the rights to what they download.
  
+## License
+This project is licensed under the **GNU General Public License v3.0 (GPLv3)** — see the [LICENSE](LICENSE) file for details.
+Third-party tools bundled or invoked by the helper app (`yt-dlp`, `FFmpeg`, `Deno`) remain subject to their respective licenses.
